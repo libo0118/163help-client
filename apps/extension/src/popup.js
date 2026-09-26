@@ -77,7 +77,7 @@ function buildDiagText(snapshot, user) {
   return [
     '🎧 网易云音乐互助客户端诊断',
     '──────────────────────',
-    '版本     : 5.1 (extension)',
+    '版本     : 5.1.1 (extension)',
     `浏览器  : ${simplifyUA(navigator.userAgent)}`,
     `账号    : ${account}`,
     '服务器  : 163music.linyu.qzz.io',

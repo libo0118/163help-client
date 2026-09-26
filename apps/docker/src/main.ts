@@ -6,12 +6,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ClientRuntime } from '../../../packages/core/src/index.ts';
+import { buildSignHeaders, subtleHmac, subtleSha256Hex, browserNonce } from '../../../packages/core/src/index.ts';
 import { DockBrowser } from './browser.ts';
 import { createStatusServer } from './server.ts';
 
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const BASE = process.env.API_BASE || 'https://163music.linyu.qzz.io';
-const VERSION = '5.1';
+const VERSION = '5.1.1';
 
 const SESSION_FILE = path.join(DATA_DIR, 'session.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -40,15 +41,26 @@ const storage = {
   setExpires: () => {},
 };
 
-async function api<T>(method: string, pathName: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null }> {
+async function api<T>(method: string, pathName: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null; error?: string; min?: string; latest?: string }> {
+  const fullUrl = BASE + pathName;
+  const rawBody = body === undefined ? '' : JSON.stringify(body);
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Client-Type': 'docker', 'X-Music-Helper-Version': VERSION };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(BASE + pathName, {
+  // HMAC 签名（版本 >= 4.0.14 服务端强制校验；mh_ck_ 密钥自动走 SHA-256 派生密钥）
+  const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, subtleSha256Hex, browserNonce) : null;
+  if (sign) { headers['X-Timestamp'] = sign.t; headers['X-Nonce'] = sign.a; headers['X-Signature'] = sign.s; }
+  const res = await fetch(fullUrl, {
     method, headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined ? undefined : rawBody,
   });
-  const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-  return { status: res.status, payload };
+  const data = await res.json().catch(() => null) as (T & { error?: string; minSupportedVersion?: string; latestVersion?: string }) | null;
+  return {
+    status: res.status,
+    payload: res.status === 200 ? (data as T) : null,
+    error: data?.error,
+    min: data?.minSupportedVersion,
+    latest: data?.latestVersion,
+  };
 }
 
 async function main() {
@@ -87,6 +99,11 @@ async function main() {
   runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
   runtime.bus.on('auth:user', (u) => { if (u) { state.helpLimit = 9000; } });
   runtime.bus.on('log:append', (e) => { state.logs.push({ level: e.level, ts: e.ts, msg: e.msg }); if (state.logs.length > 200) state.logs.shift(); state.lastEvent = e.msg; });
+  // 版本不受支持：管理端状态页可见（log:append 已写 lastEvent，这里补一条 alert 级）
+  runtime.bus.on('upgrade:required', ({ min, latest }) => {
+    state.logs.push({ level: 'alert', ts: Date.now(), msg: `版本不受支持（需 ≥${min}，最新 ${latest}），请更新客户端镜像` });
+    state.lastEvent = state.logs[state.logs.length - 1].msg;
+  });
 
   createStatusServer({ port: Number(process.env.PORT || 3000), state });
   console.log('[main] 管理端 http://0.0.0.0:3000');

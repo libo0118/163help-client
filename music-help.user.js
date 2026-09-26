@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        网易云音乐互助
 // @namespace   163help
-// @version     5.1
+// @version     5.1.1
 // @description 互助播放（油猴端）
 // @match       https://music.163.com/*
 // @match       https://163music.linyu.qzz.io/*
@@ -42,17 +42,19 @@
   };
 
   // ../../packages/core/src/sign.ts
-  async function buildSignHeaders(method, fullUrl, rawBody, token, hmacFn, nonceFn) {
+  var CLIENT_KEY_PREFIX = "mh_ck_";
+  async function buildSignHeaders(method, fullUrl, rawBody, token, hmacFn, sha256HexFn, nonceFn) {
     if (!token) return null;
+    const u = new URL(fullUrl);
+    const pathAndQuery = u.pathname + u.search;
     const ts = Math.floor(Date.now() / 1e3).toString();
     const nonce = nonceFn();
-    const bodyHash = rawBody ? await hmacFn(token, rawBody) : "";
-    const norm = `${method}
-${fullUrl}
+    const norm = `${String(method).toUpperCase()}
+${pathAndQuery}
 ${ts}
 ${nonce}
-${bodyHash}`;
-    const secret = token.startsWith("mh_ck_") ? await hmacFn(token, "") : token;
+${rawBody ?? ""}`;
+    const secret = token.startsWith(CLIENT_KEY_PREFIX) ? await sha256HexFn(token) : token;
     return { a: nonce, t: ts, s: await hmacFn(secret, norm) };
   }
   var hexBytes = (bytes) => Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -67,6 +69,10 @@ ${bodyHash}`;
     );
     const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
     return hexBytes(new Uint8Array(sig));
+  }
+  async function subtleSha256Hex(data) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
+    return hexBytes(new Uint8Array(digest));
   }
   function browserNonce() {
     const b = new Uint8Array(16);
@@ -399,7 +405,7 @@ ${bodyHash}`;
     }
     /** 领取下一单（空闲时调用；防并发） */
     async fetchNext() {
-      if (this.busy || this.phase !== "idle") return null;
+      if (this.busy || this.phase !== "idle") return { status: 0, payload: null };
       this.busy = true;
       this.setPhase("fetching");
       try {
@@ -414,10 +420,10 @@ ${bodyHash}`;
           this.setPhase("playing");
           this.bus.emit("job:current", this.current);
           this.deps.onPlaying(this.current);
-          return r.payload;
+          return { status: r.status, payload: r.payload };
         }
         this.setPhase("idle");
-        return r.payload ?? null;
+        return { status: r.status, payload: r.payload ?? null, error: r.error, min: r.min, latest: r.latest };
       } finally {
         this.busy = false;
       }
@@ -547,7 +553,18 @@ ${bodyHash}`;
     /** 主循环：领单 → 播 → 结束/失败 → 下一单（带 3s 间隔与退出） */
     async cycle() {
       while (true) {
-        const p = await this.job.fetchNext();
+        const r = await this.job.fetchNext();
+        if (r.status === 403 && r.error === "client_upgrade_required") {
+          this.log.push(
+            "error",
+            "version_blocked",
+            `\u5F53\u524D\u5BA2\u6237\u7AEF\u7248\u672C\u4E0D\u53D7\u652F\u6301\uFF0C\u8BF7\u66F4\u65B0\u5230\u6700\u65B0\u7248\u672C\uFF08\u6700\u4F4E ${r.min ?? "?"} / \u6700\u65B0 ${r.latest ?? "?"}\uFF09`
+          );
+          this.bus.emit("job:phase", "settle_failed");
+          this.bus.emit("upgrade:required", { min: r.min ?? "", latest: r.latest ?? "" });
+          return;
+        }
+        const p = r.payload;
         if (p && p.noTargetReason) {
           this.log.push("info", "no_target", String(p.noTargetReason));
           await sleep2(3e3);
@@ -813,7 +830,7 @@ ${bodyHash}`;
     /* —— B3：面板自身 state 组装脱敏诊断文本 —— */
     buildDiagnostic() {
       const st = this.state;
-      const version = st.version ?? "5.1";
+      const version = st.version ?? "5.1.1";
       const clientType = st.clientType ?? detectClientType();
       const server = st.server ?? "163music.linyu.qzz.io";
       let displayName = st.displayName;
@@ -1091,6 +1108,7 @@ $TOKENS$
   // src/main.ts
   var GM = globalThis;
   var BASE = "https://163music.linyu.qzz.io";
+  var VERSION = "5.1.1";
   var storage = {
     getToken: () => String(GM.GM_getValue("musicHelperToken", "") || ""),
     setToken: (t) => GM.GM_setValue("musicHelperToken", t),
@@ -1100,7 +1118,7 @@ $TOKENS$
   };
   var adapter = {
     clientType: "userscript",
-    version: "5.1",
+    version: VERSION,
     storage,
     probeNetwork: async () => true,
     hasPage: true,
@@ -1123,15 +1141,21 @@ $TOKENS$
     const rawBody = body === void 0 ? "" : JSON.stringify(body);
     const headers = { "Content-Type": "application/json" };
     if (token) headers["Authorization"] = `Bearer ${token}`;
-    const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, browserNonce) : null;
+    const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, subtleSha256Hex, browserNonce) : null;
     if (sign) {
-      headers["X-MH-Nonce"] = sign.a;
-      headers["X-MH-Ts"] = sign.t;
-      headers["X-MH-Sig"] = sign.s;
+      headers["X-Timestamp"] = sign.t;
+      headers["X-Nonce"] = sign.a;
+      headers["X-Signature"] = sign.s;
     }
-    const res = await fetch(fullUrl, { method, headers: { ...headers, "X-Music-Helper-Version": "5.1" }, body: body === void 0 ? void 0 : rawBody });
-    const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-    return { status: res.status, payload };
+    const res = await fetch(fullUrl, { method, headers: { ...headers, "X-Music-Helper-Version": VERSION }, body: body === void 0 ? void 0 : rawBody });
+    const data = await res.json().catch(() => null);
+    return {
+      status: res.status,
+      payload: res.status === 200 ? data : null,
+      error: data?.error,
+      min: data?.minSupportedVersion,
+      latest: data?.latestVersion
+    };
   }
   var transport = {
     next: async (token) => api("POST", "/api/next", {}, token),
@@ -1175,6 +1199,9 @@ $TOKENS$
   var panel = mountPanel();
   runtime.bus.on("auth:user", (u) => {
     panel.setState({ title: u ? `\u5DF2\u767B\u5F55 \xB7 ${u.displayName}` : "\u672A\u767B\u5F55", dotOff: !u });
+  });
+  runtime.bus.on("upgrade:required", ({ min, latest }) => {
+    panel.setState({ title: `\u7248\u672C\u4E0D\u53D7\u652F\u6301\uFF08\u9700 \u2265${min}\uFF0C\u6700\u65B0 ${latest}\uFF09\uFF0C\u8BF7\u66F4\u65B0\u811A\u672C`, dotOff: true });
   });
   runtime.bus.on("limits:updated", (s) => panel.setState({
     help: s.helpedToday,

@@ -8,6 +8,7 @@ import { mountPanel } from '../../../packages/ui/src/index.ts';
 const GM: any = globalThis;
 
 const BASE = 'https://163music.linyu.qzz.io';
+const VERSION = '5.1.1';
 
 /* ---------- 存储适配（GM_* → Tampermonkey 存储） ---------- */
 const storage = {
@@ -21,7 +22,7 @@ const storage = {
 /* ---------- 平台适配 ---------- */
 const adapter = {
   clientType: 'userscript',
-  version: '5.1',
+  version: VERSION,
   storage,
   probeNetwork: async () => true,
   hasPage: true,
@@ -37,18 +38,25 @@ const adapter = {
 };
 
 /* ---------- API 传输（fetch + 签名 + 401→refresh→重试） ---------- */
-import { buildSignHeaders, subtleHmac, browserNonce } from '../../../packages/core/src/index.ts';
+import { buildSignHeaders, subtleHmac, subtleSha256Hex, browserNonce } from '../../../packages/core/src/index.ts';
 
-async function api<T>(method: string, path: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null }> {
+async function api<T>(method: string, path: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null; error?: string; min?: string; latest?: string }> {
   const fullUrl = BASE + path;
   const rawBody = body === undefined ? '' : JSON.stringify(body);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, browserNonce) : null;
-  if (sign) { headers['X-MH-Nonce'] = sign.a; headers['X-MH-Ts'] = sign.t; headers['X-MH-Sig'] = sign.s; }
-  const res = await fetch(fullUrl, { method, headers: { ...headers, 'X-Music-Helper-Version': '5.1' }, body: body === undefined ? undefined : rawBody });
-  const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-  return { status: res.status, payload };
+  // 签名头名必须与服务端一致：X-Timestamp / X-Nonce / X-Signature（2026-09-26 修复 X-MH-* 错名）
+  const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, subtleSha256Hex, browserNonce) : null;
+  if (sign) { headers['X-Timestamp'] = sign.t; headers['X-Nonce'] = sign.a; headers['X-Signature'] = sign.s; }
+  const res = await fetch(fullUrl, { method, headers: { ...headers, 'X-Music-Helper-Version': VERSION }, body: body === undefined ? undefined : rawBody });
+  const data = await res.json().catch(() => null) as (T & { error?: string; minSupportedVersion?: string; latestVersion?: string }) | null;
+  return {
+    status: res.status,
+    payload: res.status === 200 ? (data as T) : null,
+    error: data?.error,
+    min: data?.minSupportedVersion,
+    latest: data?.latestVersion,
+  };
 }
 
 const transport = {
@@ -96,6 +104,10 @@ const panel = mountPanel();
 // core 事件 → 面板状态
 runtime.bus.on('auth:user', (u) => {
   panel.setState({ title: u ? `已登录 · ${u.displayName}` : '未登录', dotOff: !u });
+});
+// 版本不受支持（服务端 403 client_upgrade_required）：面板明示，等待用户更新
+runtime.bus.on('upgrade:required', ({ min, latest }) => {
+  panel.setState({ title: `版本不受支持（需 ≥${min}，最新 ${latest}），请更新脚本`, dotOff: true });
 });
 runtime.bus.on('limits:updated', (s) => panel.setState({
   help: s.helpedToday, limit: s.helpedLimit, ratio: s.helpedLimit > 0 ? s.helpedToday / s.helpedLimit : 0,

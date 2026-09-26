@@ -23,6 +23,15 @@ export interface CurrentJob {
   playedMs: number;
 }
 
+/** fetchNext 结果：除载荷外带回 HTTP 状态与错误码，供主循环做「版本不受支持 → 停循环」判定 */
+export interface NextResult {
+  status: number;
+  payload: NextPayload | null;
+  error?: string;
+  min?: string;
+  latest?: string;
+}
+
 export class JobStateMachine {
   phase: JobPhase = 'idle';
   current: CurrentJob | null = null;
@@ -36,8 +45,8 @@ export class JobStateMachine {
   }
 
   /** 领取下一单（空闲时调用；防并发） */
-  async fetchNext(): Promise<NextPayload | null> {
-    if (this.busy || this.phase !== 'idle') return null;
+  async fetchNext(): Promise<NextResult> {
+    if (this.busy || this.phase !== 'idle') return { status: 0, payload: null };
     this.busy = true;
     this.setPhase('fetching');
     try {
@@ -52,11 +61,11 @@ export class JobStateMachine {
         this.setPhase('playing');
         this.bus.emit('job:current', this.current);
         this.deps.onPlaying(this.current);
-        return r.payload;
+        return { status: r.status, payload: r.payload };
       }
-      // noTarget / 无单：回 idle（reason 由调用方展示）
+      // noTarget / 无单 / 403：回 idle（错误码/版本信息由调用方处理）
       this.setPhase('idle');
-      return r.payload ?? null;
+      return { status: r.status, payload: r.payload ?? null, error: r.error, min: r.min, latest: r.latest };
     } finally {
       this.busy = false;
     }

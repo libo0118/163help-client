@@ -96,7 +96,12 @@ export interface ClientLogPayload {
 export interface ApiResult<T = unknown> {
   status: number;
   payload: T | null;
+  /** 服务端错误体里的 error 码（如 client_upgrade_required / invalid_signature） */
   error?: string;
+  /** 403 版本门控体：minSupportedVersion */
+  min?: string;
+  /** 403 版本门控体：latestVersion */
+  latest?: string;
 }
 
 /** 面板限额载荷（limits:updated） */

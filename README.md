@@ -1,6 +1,6 @@
 # 163help-client 🎵
 
-> 当前版本：**v5.1**
+> 当前版本：**v5.1.1**
 
 网易云音乐互助播放的**客户端**仓库：客户端源码（monorepo）+ 发布产物（油猴脚本 / Chrome 扩展 / Docker 常驻客户端）都在这里。
 
@@ -27,7 +27,7 @@
 
 扩展版是油猴脚本的完整移植，额外提供**开机自启 + 标签静音**，适合想把浏览器常驻挂着的人：
 
-1. 下载本仓库 [Releases](https://github.com/y08lin4/163help-client/releases) 里的 `163help-extension-v5.1.zip`（或直接 clone 本仓库取 `extension/` 目录）
+1. 下载本仓库 [Releases](https://github.com/y08lin4/163help-client/releases) 里的 `163help-extension-v5.1.1.zip`（或直接 clone 本仓库取 `extension/` 目录）
 2. Chrome 打开 `chrome://extensions`
 3. 右上角开启「开发者模式」
 4. 点「加载已解压的扩展程序」，选择 `extension/` 目录（直接包含 `manifest.json` 的那一层）
@@ -37,7 +37,7 @@
 
 ### 方式 C：Docker 常驻客户端（VPS 24 小时在线互助）
 
-不需要打开浏览器，把客户端放进 Docker 容器，在 VPS 上 **24 小时常驻互助**：无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前版本 **v5.1**，镜像已公开、匿名可拉取。
+不需要打开浏览器，把客户端放进 Docker 容器，在 VPS 上 **24 小时常驻互助**：无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前版本 **v5.1.1**，镜像已公开、匿名可拉取。
 
 **一键脚本（自动选择镜像通道）**：脚本默认先试 GitHub GHCR、失败自动切换 Cloudflare CDN；国内 VPS 可 `IMAGE_SOURCE=cdn` 强制走 CDN（免登录、更稳）：
 

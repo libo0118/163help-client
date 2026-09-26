@@ -19,8 +19,12 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # GHCR 包 ghcr.io/y08lin4/163help-client/docker-client 实际归属改名前的
+          # 163help-client-legacy 仓库，本仓 GITHUB_TOKEN 对它无写权限（2026-09 CI
+          # 断供根因）。改走用户级 PAT（write:packages，可写该用户名下所有 package）；
+          # secret 未配置时回退 GITHUB_TOKEN（仅当包归属已修复时可用）。
+          username: ${{ secrets.GHCR_USER || 'y08lin4' }}
+          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
       - name: Extract tags
         id: meta
         uses: docker/metadata-action@v5

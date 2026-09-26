@@ -109,7 +109,19 @@ export class ClientRuntime {
   /** 主循环：领单 → 播 → 结束/失败 → 下一单（带 3s 间隔与退出） */
   private async cycle(): Promise<void> {
     while (true) {
-      const p = await this.job.fetchNext();
+      const r = await this.job.fetchNext();
+      // 版本不受支持（服务端 403 client_upgrade_required）：
+      // 明确提示「请更新脚本」并停止循环，不再 3s 盲目重打 /api/next。
+      // （2026-09-26 修复：旧版 5.x 对 403 无退避重发，6 台 docker 客户端
+      //   24h 打空 5.4 万次请求，全部 client_upgrade_required。）
+      if (r.status === 403 && r.error === 'client_upgrade_required') {
+        this.log.push('error', 'version_blocked',
+          `当前客户端版本不受支持，请更新到最新版本（最低 ${r.min ?? '?'} / 最新 ${r.latest ?? '?'}）`);
+        this.bus.emit('job:phase', 'settle_failed');
+        this.bus.emit('upgrade:required', { min: r.min ?? '', latest: r.latest ?? '' });
+        return;
+      }
+      const p = r.payload;
       if (p && p.noTargetReason) {
         this.log.push('info', 'no_target', String(p.noTargetReason));
         await sleep(3000);

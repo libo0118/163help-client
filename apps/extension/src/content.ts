@@ -4,9 +4,11 @@
  */
 import { ClientRuntime } from '../../../packages/core/src/index.ts';
 import { mountPanel } from '../../../packages/ui/src/index.ts';
+import { buildSignHeaders, subtleHmac, subtleSha256Hex, browserNonce } from '../../../packages/core/src/index.ts';
 
 const BASE = 'https://163music.linyu.qzz.io';
 const BASE_HOST = new URL(BASE).host;
+const VERSION = '5.1.1';
 
 const store = {
   async get(key: string) { return (await chrome.storage.local.get(key))[key]; },
@@ -22,7 +24,7 @@ const storage = {
 };
 
 const adapter = {
-  clientType: 'extension', version: '5.1', storage,
+  clientType: 'extension', version: VERSION, storage,
   probeNetwork: async () => true, hasPage: true,
   onLifecycle: (h: 'freeze' | 'resume', cb: () => void) => {
     if (h === 'freeze') {
@@ -34,15 +36,26 @@ const adapter = {
   },
 };
 
-async function api<T>(method: string, path: string, body?: unknown, token = ''): Promise<{ status: number; payload: T | null }> {
+async function api<T>(method: string, path: string, body?: unknown, token = ''): Promise<{ status: number; payload: T | null; error?: string; min?: string; latest?: string }> {
+  const fullUrl = BASE + path;
+  const rawBody = body === undefined ? '' : JSON.stringify(body);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(BASE + path, {
-    method, headers: { ...headers, 'X-Music-Helper-Version': '5.1', 'X-Client-Type': 'extension' },
-    body: body === undefined ? undefined : JSON.stringify(body),
+  // HMAC 签名（版本 >= 4.0.14 服务端强制校验；无 token 时降级不签名，由服务端按版本门控处理）
+  const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, subtleSha256Hex, browserNonce) : null;
+  if (sign) { headers['X-Timestamp'] = sign.t; headers['X-Nonce'] = sign.a; headers['X-Signature'] = sign.s; }
+  const res = await fetch(fullUrl, {
+    method, headers: { ...headers, 'X-Music-Helper-Version': VERSION, 'X-Client-Type': 'extension' },
+    body: body === undefined ? undefined : rawBody,
   });
-  const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-  return { status: res.status, payload };
+  const data = await res.json().catch(() => null) as (T & { error?: string; minSupportedVersion?: string; latestVersion?: string }) | null;
+  return {
+    status: res.status,
+    payload: res.status === 200 ? (data as T) : null,
+    error: data?.error,
+    min: data?.minSupportedVersion,
+    latest: data?.latestVersion,
+  };
 }
 
 const transport = {
@@ -100,6 +113,10 @@ function fmt(ms: number): string {
 
 /* ---------- core 事件 → 面板状态 & 快照 ---------- */
 runtime.bus.on('auth:user', (u) => panel.setState({ title: u ? `已登录 · ${u.displayName}` : '未登录', dotOff: !u }));
+// 版本不受支持（服务端 403 client_upgrade_required）：面板明示，等待用户更新
+runtime.bus.on('upgrade:required', ({ min, latest }) => {
+  panel.setState({ title: `版本不受支持（需 ≥${min}，最新 ${latest}），请更新脚本`, dotOff: true });
+});
 runtime.bus.on('auth:status', (s) => { snap.online = s === 'valid'; void snapshot(); });
 runtime.bus.on('job:current', (j) => {
   snap.taskName = j ? j.musicName : '';

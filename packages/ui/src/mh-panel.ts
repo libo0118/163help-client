@@ -249,7 +249,7 @@ export class MhPanel extends HTMLElement {
   /* —— B3：面板自身 state 组装脱敏诊断文本 —— */
   buildDiagnostic(): string {
     const st = this.state as Record<string, any>;
-    const version = st.version ?? '5.1';
+    const version = st.version ?? '5.1.1';
     const clientType = st.clientType ?? detectClientType();
     const server = st.server ?? '163music.linyu.qzz.io';
     let displayName = st.displayName as string | undefined;

@@ -19,10 +19,19 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 /** 配置持久化（cookie/key 由管理端写入） */
 const cfg = {
   load() { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return {}; } },
-  save(c: object) { fs.writeFileSync(SESSION_FILE, JSON.stringify(c)); },
+  save(c: object) {
+    fs.writeFileSync(SESSION_FILE + '.tmp', JSON.stringify(c), { mode: 0o600 });
+    fs.renameSync(SESSION_FILE + '.tmp', SESSION_FILE);
+  },
 };
 
 const state = {
+  get configured() { const c = cfg.load(); return Boolean(c.neteaseCookie && c.clientKey); },
+  onConfig(c: { neteaseCookie: string; clientKey: string }) {
+    cfg.save(c);
+    // Restart after the HTTP response; Docker reloads the persisted browser cookie and runtime token.
+    setTimeout(() => process.exit(0), 1000).unref();
+  },
   startedAt: Date.now(),
   helpUsed: 0, helpLimit: 9000,
   recv: 0, recvLimit: 26,

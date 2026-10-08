@@ -11,3 +11,4 @@ apps/extension/content.bundle.js
 .env
 *.local
 .npm-cache/
+data/

@@ -3,3 +3,7 @@ dist/
 .git/
 .npmcache/
 *.md
+.env
+.env.*
+data/
+*.log

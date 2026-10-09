@@ -188,7 +188,7 @@ async function diag(){
 }
 poll(); setInterval(()=>poll(false),2000);
 </script>` : `
-<div class="dock" style="max-width:400px;margin:10vh auto">
+<div class="dock" style="max-width:400px;margin:10vh auto;flex-direction:column;min-height:0">
   <div class="side" style="width:100%;flex-direction:row;padding:12px 16px;border-right:none;border-bottom:1px solid var(--line)">
     <div class="logo" style="padding:0"><span class="logo-ic">♪</span>网易云音乐互助</div>
     <div class="sp" style="flex:1"></div><span class="tip">v5.1</span>

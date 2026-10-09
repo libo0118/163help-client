@@ -37,6 +37,7 @@ export class ClientRuntime {
   readonly job: JobStateMachine;
   readonly heart: HeartbeatEngine;
   readonly log: ClientLogger;
+  private finishingJob: CurrentJob | null = null;
 
   constructor(private deps: RuntimeDeps) {
     this.log = new ClientLogger((p) => this.deps.transport.sendLog(p), {
@@ -52,9 +53,14 @@ export class ClientRuntime {
 
     this.job = new JobStateMachine({
       next: async () => {
-        const token = await this.auth.ensureToken();
-        if (!token) return { status: 401, payload: null, error: 'no_token' };
-        return this.deps.transport.next(token);
+        try {
+          const token = await this.auth.ensureToken();
+          if (!token) return { status: 401, payload: null, error: 'no_token' };
+          return await this.deps.transport.next(token);
+        } catch (error) {
+          this.log.push('error', 'next_failed', String(error));
+          throw error;
+        }
       },
       finish: async (input) => {
         const token = await this.auth.ensureToken();
@@ -68,7 +74,7 @@ export class ClientRuntime {
       },
       onPlaying: (job) => {
         this.heart.start(job.jobId);
-        void this.deps.player.play(job.musicName, job.targetMs, '');
+        void this.play(job);
       },
       onSettleFailed: (code, msg) => {
         this.log.push('error', 'settle_failed', msg, { code });
@@ -91,12 +97,40 @@ export class ClientRuntime {
     });
 
     deps.player.onProgress((playedMs, positionMs, durationMs) => {
+      const job = this.job.current;
+      if (!job || this.job.phase !== 'playing' || [playedMs, positionMs, durationMs].some((n) => !Number.isFinite(n) || n < 0)) return;
       this.job.updateProgress(playedMs);
-      void this.heart.pulse(playedMs, positionMs, durationMs, true);
+      const pulse = this.heart.pulse(playedMs, positionMs, durationMs, true);
+      if (!Number.isFinite(job.targetMs) || job.targetMs <= 0 || playedMs < job.targetMs || this.finishingJob === job) return;
+      this.finishingJob = job;
+      void (async () => {
+        await pulse;
+        if (this.job.current === job && this.job.phase === 'playing') {
+          const result = await this.job.submitFinish({
+            jobId: job.jobId, playedMs, positionMs, durationMs,
+            playbackRate: 1, jumpCount: 0, backwardJumpCount: 0,
+            listenDriftMs: Math.abs(playedMs - positionMs), recoveryAttempts: 0, stallDetected: false,
+          });
+          if (result === 'settled') this.log.push('info', 'job_finished', job.musicName);
+        }
+      })().finally(() => { if (this.finishingJob === job) this.finishingJob = null; });
     });
 
     // UI 镜像事件
-    this.bus.on('job:current', (j: CurrentJob | null) => { if (j) this.log.push('info', 'job_start', j.musicName); });
+    this.bus.on('job:current', (j: CurrentJob | null) => {
+      if (j) this.log.push('info', 'job_start', j.musicName);
+      else { this.heart.stop(); this.deps.player.stop(); }
+    });
+  }
+
+  private async play(job: CurrentJob): Promise<void> {
+    let detail = '播放器加载失败';
+    try {
+      if (await this.deps.player.play(job.musicId, job.targetMs, '')) return;
+    } catch (error) { detail = String(error); }
+    if (this.job.current !== job || this.job.phase !== 'playing') return;
+    this.log.push('error', 'job_play_failed', detail, { jobId: job.jobId, musicId: job.musicId });
+    await this.job.abandon('play_start_fail', detail);
   }
 
   async start(autostart: boolean): Promise<void> {
@@ -109,12 +143,10 @@ export class ClientRuntime {
   /** 主循环：领单 → 播 → 结束/失败 → 下一单（带 3s 间隔与退出） */
   private async cycle(): Promise<void> {
     while (true) {
-      const p = await this.job.fetchNext();
-      if (p && p.noTargetReason) {
-        this.log.push('info', 'no_target', String(p.noTargetReason));
-        await sleep(3000);
-        continue;
-      }
+      try {
+        const p = await this.job.fetchNext();
+        if (p && p.noTargetReason) this.log.push('info', 'no_target', String(p.noTargetReason));
+      } catch { /* next_failed 已记录；状态回 idle 后继续等待 */ }
       await sleep(3000);
     }
   }

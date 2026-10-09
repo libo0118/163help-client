@@ -162,7 +162,7 @@ async function poll(manual){
     $('recvBar').style.width=Math.min(100,(d.recvLimit?(d.recv||0)/d.recvLimit:0)*100)+'%';
     $('up').textContent=fmt(d.uptime); $('footup').textContent=fmt(d.uptime);
     $('upInfo').textContent=(d.jobsDone||0)+' 单 · 稳定';
-    $('acct').textContent=(d.acctName||(d.configured?'已配置':'未配置')); $('acctInfo').textContent=(d.configured?'配置 ✅':'未配置 ⚠️');
+    $('acct').textContent=(d.acctName||(d.configured?'已配置':'未配置')); $('acctInfo').textContent=d.lastError?d.lastError:(d.authenticated?'连接正常 ✅':(d.configured?'认证中…':'未配置 ⚠️'));
     $('jobLbl').textContent=d.job?('《'+d.job.musicName+'》 '+(Math.floor((d.job.playedMs||0)/1000))+'s'):'空闲中';
     $('jobTip').textContent=d.job?('进行中 '+(Math.floor((d.job.playedMs||0)/1000))+'s / '+Math.max(1,Math.floor((d.job.targetMs||0)/1000))+'s'):'挂机后自动领取任务';
     $('jobBar').style.width=d.job?Math.min(100,(d.job.playedMs/Math.max(1,d.job.targetMs))*100)+'%':'0%';

@@ -8,10 +8,11 @@ import path from 'node:path';
 import { ClientRuntime } from '../../../packages/core/src/index.ts';
 import { DockBrowser } from './browser.ts';
 import { createStatusServer } from './server.ts';
+import { API_VERSION, callSignedApi, normalizeMe } from './api.ts';
 
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const BASE = process.env.API_BASE || 'https://163music.linyu.qzz.io';
-const VERSION = '5.1';
+const VERSION = API_VERSION;
 
 const SESSION_FILE = path.join(DATA_DIR, 'session.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -38,6 +39,7 @@ const state = {
   job: null as { musicName: string; playedMs: number; targetMs: number } | null,
   hbIntervals: [] as number[],
   lastEvent: '',
+  acctName: '', authenticated: false, lastError: '',
   logs: [] as Array<{ level: string; ts: number; msg: string }>,
 };
 
@@ -49,15 +51,20 @@ const storage = {
   setExpires: () => {},
 };
 
-async function api<T>(method: string, pathName: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Client-Type': 'docker', 'X-Music-Helper-Version': VERSION };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(BASE + pathName, {
-    method, headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-  return { status: res.status, payload };
+let lastApiError = '', lastApiErrorAt = 0;
+async function api<T = any>(method: string, pathName: string, body?: unknown, token = storage.getToken()) {
+  const result = await callSignedApi<T>(method, BASE.replace(/\/$/, '') + pathName, body, token);
+  if (pathName !== '/api/client/log' && result.status !== 200) {
+    const code = /^[a-zA-Z0-9_.:-]{1,80}$/.test(result.error || '') ? result.error : `http_${result.status}`;
+    const message = `API ${method} ${pathName} → ${result.status} (${code})`;
+    state.lastError = message;
+    if (message !== lastApiError || Date.now() - lastApiErrorAt >= 60_000) {
+      state.logs.push({ level: 'error', ts: Date.now(), msg: message });
+      if (state.logs.length > 200) state.logs.shift();
+      console.warn(message); lastApiError = message; lastApiErrorAt = Date.now();
+    }
+  } else if (pathName === '/api/me' && result.status === 200) state.lastError = '';
+  return result;
 }
 
 async function main() {
@@ -67,13 +74,13 @@ async function main() {
   console.log('[main] 浏览器已就绪');
 
   const transport = {
-    next: async (token: string) => api('POST', '/api/next', {}, token),
+    next: async (token: string) => api('GET', '/api/next?preference=random', undefined, token),
     finish: async (token: string, input: unknown) => api('POST', '/api/play/finish', input, token),
-    abandon: async (token: string, reason: string, detail: string) => { await api('POST', '/api/play/abandon', { reason, detail }, token); },
+    abandon: async (token: string, reason: string, detail: string) => { await api('POST', '/api/play/abandon', { jobId: runtime.job.current?.jobId, reason, detail }, token); },
     heartbeat: async (token: string, input: unknown) => (await api('POST', '/api/play/heartbeat', input, token)).status === 200,
     refresh: async () => null, // key 凭证不走 session refresh
-    me: () => api('GET', '/api/me'),
-    sendLog: async (p: unknown) => { await api('POST', '/api/client/log', p); },
+    me: async () => { const r = await api('GET', '/api/me'); return { ...r, payload: r.status === 200 && r.payload ? normalizeMe(r.payload) : null }; },
+    sendLog: async (p: unknown) => { await api('POST', '/api/client/log', { ...(p as object), clientVersion: VERSION, clientType: 'docker' }); },
   };
 
   const player = {
@@ -89,12 +96,13 @@ async function main() {
   const runtime = new ClientRuntime({ adapter: {
     clientType: 'docker', version: VERSION, storage,
     probeNetwork: async () => true, hasPage: false,
-  }, transport, player } as never);
+  }, transport, player });
 
   runtime.bus.on('job:current', (j) => { state.job = j ? { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs } : null; });
   runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
-  runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
-  runtime.bus.on('auth:user', (u) => { if (u) { state.helpLimit = 9000; } });
+  runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs / 1000); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
+  runtime.bus.on('auth:user', (u) => { state.authenticated = Boolean(u); state.acctName = u?.displayName || ''; if (u) { state.lastError = ''; runtime.log.push('info', 'auth_ok', '账号认证通过'); } });
+  runtime.bus.on('limits:updated', (l) => { state.helpUsed = l.helpedToday; state.helpLimit = l.helpedLimit; state.recv = l.receivedToday; state.recvLimit = l.receivedLimit; });
   runtime.bus.on('log:append', (e) => { state.logs.push({ level: e.level, ts: e.ts, msg: e.msg }); if (state.logs.length > 200) state.logs.shift(); state.lastEvent = e.msg; });
 
   createStatusServer({ port: Number(process.env.PORT || 3000), state });

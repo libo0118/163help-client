@@ -78,6 +78,7 @@ export function createStatusServer({ port, state }: { port: number; state: { [k:
             uptime: Math.floor((Date.now() - state.startedAt) / 1000),
             version: '5.1',
             configured: Boolean(state.configured),
+            acctName: state.acctName || '', authenticated: Boolean(state.authenticated), lastError: state.lastError || '',
             job: state.job, hbIntervals: state.hbIntervals,
             helpUsed: state.helpUsed, helpLimit: state.helpLimit,
             recv: state.recv, recvLimit: state.recvLimit,

@@ -29,6 +29,10 @@ export class HeartbeatEngine {
   private lastAt = 0;
   private jobId = '';
   private stopped = true;
+  private latest: HeartbeatInput | null = null;
+  private sentAt: number | null = null;
+  private inFlight = false;
+  private generation = 0;
   private opts: { firstHbGraceMs: number; hbStallMs: number; intervalMs: number };
 
   constructor(
@@ -43,7 +47,7 @@ export class HeartbeatEngine {
       hbStallMs: opts.hbStallMs ?? HB_STALL_MS,
       intervalMs: opts.intervalMs ?? HEARTBEAT_INTERVAL_MS,
     };
-    this.adapter.onLifecycle?.('freeze', () => { void this.flush().catch(() => {}); });
+    this.adapter.onLifecycle?.('freeze', () => { void this.flush(true); });
     this.adapter.onLifecycle?.('resume', () => { void this.onResumeLifecycle(); });
   }
 
@@ -56,6 +60,7 @@ export class HeartbeatEngine {
     // 首心跳宽限
     this.graceTimer = setTimeout(() => {
       if (!this.stopped && this.lastAt === 0) {
+        this.stop();
         this.events.onAbandon('play_start_fail', `首心跳 30s 内未出现`);
       }
     }, this.opts.firstHbGraceMs);
@@ -65,25 +70,36 @@ export class HeartbeatEngine {
   /** 播放心跳（播放器回调） */
   async pulse(playedMs: number, positionMs: number, durationMs: number, monotonic: boolean): Promise<void> {
     if (this.stopped) return;
-    this.lastAt = Date.now();
-    await this.flush(playedMs, positionMs, durationMs, monotonic);
+    this.latest = { jobId: this.jobId, playedMs, positionMs, durationMs, monotonic };
+    await this.tick();
   }
 
-  private async flush(playedMs = 0, positionMs = 0, durationMs = 0, monotonic = true): Promise<void> {
-    if (this.stopped || !this.jobId) return;
-    const ok = await this.api.heartbeat({
-      jobId: this.jobId, playedMs, positionMs, durationMs, monotonic,
-    });
-    if (ok) {
-      this.bus.emit('heartbeat:tick', { jobId: this.jobId, intervalMs: HEARTBEAT_INTERVAL_MS, lastAtMs: Date.now() });
+  private async flush(force = false): Promise<void> {
+    if (this.stopped || !this.jobId || !this.latest || this.inFlight) return;
+    const now = Date.now();
+    if (!force && this.sentAt !== null && now - this.sentAt < this.opts.intervalMs) return;
+    const generation = this.generation;
+    const input = this.latest;
+    this.sentAt = now;
+    this.inFlight = true;
+    try {
+      const ok = await this.api.heartbeat(input);
+      if (ok && generation === this.generation && !this.stopped) {
+        this.lastAt = Date.now();
+        this.bus.emit('heartbeat:tick', { jobId: input.jobId, intervalMs: this.opts.intervalMs, lastAtMs: this.lastAt });
+      }
+    } catch { /* 未确认的心跳不能延长任务有效期 */ }
+    finally {
+      if (generation === this.generation) this.inFlight = false;
     }
   }
 
   private async tick(): Promise<void> {
     if (this.stopped || !this.jobId) return;
-    if (this.lastAt === 0) return; // 首心跳前由 graceTimer 判定
-    if (Date.now() - this.lastAt > this.opts.hbStallMs) {
-      this.events.onAbandon('heartbeat_lost', `距上次心跳 ${Math.round((Date.now() - this.lastAt) / 1000)}s`);
+    if (this.lastAt > 0 && Date.now() - this.lastAt > this.opts.hbStallMs) {
+      const elapsed = Date.now() - this.lastAt;
+      this.stop();
+      this.events.onAbandon('heartbeat_lost', `距上次心跳 ${Math.round(elapsed / 1000)}s`);
       return;
     }
     await this.flush();
@@ -91,15 +107,18 @@ export class HeartbeatEngine {
 
   private async onResumeLifecycle(): Promise<void> {
     if (this.stopped || !this.jobId) return;
-    // 恢复：tick 会立即续听；事件告知 UI
-    this.bus.emit('heartbeat:tick', { jobId: this.jobId, intervalMs: 0, lastAtMs: Date.now() });
-    this.events.onResume();
+    await this.tick();
+    if (!this.stopped) this.events.onResume();
   }
 
   stop(): void {
     this.stopped = true;
     this.jobId = '';
     this.lastAt = 0;
+    this.latest = null;
+    this.sentAt = null;
+    this.inFlight = false;
+    this.generation++;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null; }
   }

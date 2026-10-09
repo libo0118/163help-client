@@ -11,13 +11,14 @@ export interface DispatchDeps {
   finish(input: FinishInput): Promise<ApiResult<{ settled?: boolean }>>;
   abandon(reason: string, detail: string): Promise<void>;
   /** 播放开始回调：由 UI/播放器拉起心跳 */
-  onPlaying(job: { jobId: string; musicName: string; targetMs: number }): void;
+  onPlaying(job: CurrentJob): void;
   /** 结算失败提示（403/过期等）——明示「无心跳未结算，请重新听」 */
   onSettleFailed(code: string, msg: string): void;
 }
 
 export interface CurrentJob {
   jobId: string;
+  musicId: string;
   musicName: string;
   targetMs: number;
   playedMs: number;
@@ -27,6 +28,7 @@ export class JobStateMachine {
   phase: JobPhase = 'idle';
   current: CurrentJob | null = null;
   private busy = false; // 防重入
+  private finishing: CurrentJob | null = null;
 
   constructor(private deps: DispatchDeps, private bus: EventBus) {}
 
@@ -45,8 +47,9 @@ export class JobStateMachine {
       if (r.status === 200 && r.payload && r.payload.jobId && r.payload.musicId) {
         this.current = {
           jobId: r.payload.jobId,
-          musicName: r.payload.owner?.displayName ? '' : String(r.payload.musicId),
-          targetMs: r.payload.targetDurationMs ?? 0,
+          musicId: r.payload.musicId,
+          musicName: String(r.payload.musicId),
+          targetMs: r.payload.requiredListenMs ?? r.payload.targetDurationMs ?? 0,
           playedMs: 0,
         };
         this.setPhase('playing');
@@ -57,6 +60,10 @@ export class JobStateMachine {
       // noTarget / 无单：回 idle（reason 由调用方展示）
       this.setPhase('idle');
       return r.payload ?? null;
+    } catch (error) {
+      if (this.current) this.clear(this.current);
+      else this.setPhase('idle');
+      throw error;
     } finally {
       this.busy = false;
     }
@@ -70,36 +77,40 @@ export class JobStateMachine {
 
   /** 播放完成提交 */
   async submitFinish(input: FinishInput): Promise<'settled' | 'rejected' | 'error'> {
-    if (!this.current) return 'error';
+    const job = this.current;
+    if (!job || this.phase !== 'playing' || this.finishing === job || input.jobId !== job.jobId) return 'error';
+    this.finishing = job;
     try {
       const r = await this.deps.finish(input);
-      if (r.status === 200 || r.payload?.settled) {
-        this.clear();
+      if (this.current !== job || this.phase !== 'playing') return 'error';
+      if (r.status === 200 && r.payload && r.payload.settled !== false) {
         return 'settled';
       }
-      if (r.status === 403 || r.payload === null) {
-        this.deps.onSettleFailed(String(r.payload && 'error' in r.payload ? (r.payload as { error?: string }).error : 'rejected'), String(r.error ?? ''));
-      }
-      this.clear();
-      return r.status === 403 ? 'rejected' : 'error';
-    } catch {
-      this.clear();
+      this.deps.onSettleFailed(String(r.status), String(r.error ?? '结算被拒绝，请重新听'));
+      return r.status === 403 || r.payload?.settled === false ? 'rejected' : 'error';
+    } catch (error) {
+      if (this.current === job && this.phase === 'playing') this.deps.onSettleFailed('network_error', String(error));
       return 'error';
+    } finally {
+      if (this.phase === 'playing') this.clear(job);
+      if (this.finishing === job) this.finishing = null;
     }
   }
 
   /** 主动放弃（30s 无首心跳 / 45s 心跳中断 / 播放器错误） */
   async abandon(reason: string, detail: string): Promise<void> {
     const job = this.current;
+    if (!job || this.phase === 'abandoning') return;
     this.setPhase('abandoning');
     try {
-      if (job) await this.deps.abandon(reason, detail);
+      await this.deps.abandon(reason, detail);
     } finally {
-      this.clear();
+      this.clear(job);
     }
   }
 
-  private clear(): void {
+  private clear(job: CurrentJob): void {
+    if (this.current !== job) return;
     this.current = null;
     this.setPhase('idle');
     this.bus.emit('job:current', null);

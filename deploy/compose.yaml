@@ -1,6 +1,6 @@
 services:
   music163:
-    image: local/163help-client:5.1-arm64-libo.1
+    image: local/163help-client:5.1-arm64-libo.2
     build:
       context: ..
       dockerfile: apps/docker/Dockerfile

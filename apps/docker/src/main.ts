@@ -40,6 +40,7 @@ const state = {
   hbIntervals: [] as number[],
   lastEvent: '',
   acctName: '', authenticated: false, lastError: '',
+  jobsDone: 0,
   logs: [] as Array<{ level: string; ts: number; msg: string }>,
 };
 
@@ -103,7 +104,12 @@ async function main() {
   runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs / 1000); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
   runtime.bus.on('auth:user', (u) => { state.authenticated = Boolean(u); state.acctName = u?.displayName || ''; if (u) { state.lastError = ''; runtime.log.push('info', 'auth_ok', '账号认证通过'); } });
   runtime.bus.on('limits:updated', (l) => { state.helpUsed = l.helpedToday; state.helpLimit = l.helpedLimit; state.recv = l.receivedToday; state.recvLimit = l.receivedLimit; });
-  runtime.bus.on('log:append', (e) => { state.logs.push({ level: e.level, ts: e.ts, msg: e.msg }); if (state.logs.length > 200) state.logs.shift(); state.lastEvent = e.msg; });
+  runtime.bus.on('log:append', (e) => {
+    const msg = e.event === 'job_finished' ? `播放完成并已提交结算：${e.msg}` : e.event === 'job_start' ? `开始播放：${e.msg}` : e.msg;
+    state.logs.push({ level: e.level, ts: e.ts, msg });
+    if (state.logs.length > 200) state.logs.shift(); state.lastEvent = msg;
+    if (e.event === 'job_finished') { state.jobsDone++; void runtime.auth.refreshUser().catch(() => {}); }
+  });
 
   createStatusServer({ port: Number(process.env.PORT || 3000), state });
   console.log('[main] 管理端 http://0.0.0.0:3000');
